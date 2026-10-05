@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# builds
+dist/
+build/
+*.tsbuildinfo
+
+# env & secrets — never commit
+.env
+.env.*
+!.env.example
+
+# local artifacts
+.storage/
+coverage/
+*.log
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# project backups present in the working folder
+*.zip

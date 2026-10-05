@@ -1,0 +1,721 @@
+// TR Life OS — PostgreSQL schema (Prisma).
+// Design rules applied here:
+//   * UUID primary keys, createdAt/updatedAt everywhere
+//   * real timestamptz for every deadline/expiry (NO human-readable date strings)
+//   * enums for statuses/roles, FKs + indexes on hot paths, unique constraints
+//   * soft delete (deletedAt) only where it matters (users, jobs, providers, documents)
+//   * scores are NOT the source of truth: they are computed by services and, where
+//     expensive, cached (job_matches) with a computedAt stamp.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================ ENUMS ============================
+
+enum Role {
+  USER
+  PROVIDER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum Country {
+  IR
+  TR
+}
+
+enum UserStatus {
+  newcomer
+  tourist_residence
+  student
+  employed
+  business_owner
+  family
+}
+
+enum LanguageLevel {
+  Native
+  Fluent
+  Advanced
+  Intermediate
+  Beginner
+}
+
+enum DocumentType {
+  passport
+  residence
+  insurance
+  rental_contract
+  tax
+  education
+  cv
+  other
+}
+
+enum DocumentStatus {
+  ready
+  needs_translation
+  pending
+  expired
+  needs_review
+}
+
+enum VerificationStatus {
+  unverified
+  pending
+  verified
+  rejected
+}
+
+enum JourneyStepStatus {
+  done
+  in_progress
+  upcoming
+  long_term
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERNSHIP
+}
+
+enum JobStatus {
+  active
+  hidden
+  expired
+}
+
+enum JobSourceHealth {
+  unknown
+  healthy
+  degraded
+  disabled
+}
+
+enum ApplicationStatus {
+  draft
+  submitted
+  interviewing
+  offered
+  rejected
+  withdrawn
+}
+
+enum ProviderCategory {
+  lawyer
+  translator
+  realestate
+  accountant
+  insurance
+  company_registration
+  education_consultant
+}
+
+enum ProviderStatus {
+  pending
+  active
+  suspended
+}
+
+enum TicketStatus {
+  open
+  waiting_response
+  in_progress
+  resolved
+}
+
+enum TicketPriority {
+  low
+  medium
+  high
+  urgent
+}
+
+enum NotificationType {
+  info
+  warning
+  success
+  danger
+}
+
+enum NotificationEvent {
+  DOCUMENT_EXPIRING
+  APPLICATION_STATUS_CHANGED
+  TASK_DUE_SOON
+  TICKET_REPLIED
+  JOB_MATCHED
+}
+
+enum CitizenshipGoal {
+  investment
+  long_term_residence
+  marriage
+  work
+  business
+  other
+}
+
+enum TrustLevel {
+  Verified
+  Community
+  Unverified
+}
+
+// ============================ IDENTITY ============================
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  passwordHash    String
+  fullName        String
+  role            Role      @default(USER)
+  country         Country   @default(TR)
+  city            String?
+  onboarded       Boolean   @default(false)
+  emailVerifiedAt DateTime?
+  // Bump to invalidate all issued refresh tokens for this user.
+  tokenVersion    Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  profile        UserProfile?
+  skills         UserSkill[]
+  languages      UserLanguage[]
+  documents      Document[]
+  journeys       UserJourneyStep[]
+  tasks          Task[]
+  savedJobs      SavedJob[]
+  applications   Application[]
+  jobMatches     JobMatch[]
+  tickets        Ticket[]
+  ticketMessages TicketMessage[]
+  notifications  Notification[]
+  sessions       RefreshSession[]
+  providerProfile Provider?   @relation("ProviderOwner")
+  reviewsWritten ProviderReview[]
+  audits         AuditLog[]
+
+  @@index([deletedAt])
+  @@map("users")
+}
+
+model RefreshSession {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  userAgent String?
+  ip        String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_sessions")
+}
+
+model UserProfile {
+  id                     String     @id @default(uuid())
+  userId                 String     @unique
+  status                 UserStatus @default(newcomer)
+  profession             String?
+  yearsOfExperience      Int        @default(0)
+  addressRegistered      Boolean    @default(false)
+  // Real timestamps — the UI derives "days remaining" from these.
+  permitExpiresAt        DateTime?
+  passportExpiresAt      DateTime?
+  insuranceExpiresAt     DateTime?
+  rentalContractEndsAt   DateTime?
+  // Cached, service-computed indicators (recomputed, never trusted from client).
+  careerScoreCache       Int?
+  citizenshipProgressCache Int?
+  residenceStartedAt     DateTime?
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+// ============================ SKILLS & LANGUAGES ============================
+
+model Skill {
+  id       String        @id @default(uuid())
+  name     String        @unique
+  category String
+
+  users UserSkill[]
+  jobs  JobSkill[]
+
+  @@map("skills")
+}
+
+model UserSkill {
+  id       String @id @default(uuid())
+  userId   String
+  skillId  String
+  level    Int    @default(50)
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, skillId])
+  @@index([skillId])
+  @@map("user_skills")
+}
+
+model Language {
+  id   String @id @default(uuid())
+  name String @unique
+  code String @unique
+
+  users UserLanguage[]
+  jobs  JobLanguage[]
+
+  @@map("languages")
+}
+
+model UserLanguage {
+  id         String        @id @default(uuid())
+  userId     String
+  languageId String
+  level      LanguageLevel @default(Beginner)
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  language Language @relation(fields: [languageId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, languageId])
+  @@index([languageId])
+  @@map("user_languages")
+}
+
+// ============================ DOCUMENTS ============================
+
+model Document {
+  id               String             @id @default(uuid())
+  userId           String
+  type             DocumentType
+  originalFilename String
+  storageKey       String
+  mimeType         String
+  sizeBytes        Int
+  status           DocumentStatus     @default(pending)
+  verification     VerificationStatus @default(unverified)
+  verificationNote String?
+  verifiedAt       DateTime?
+  expiresAt        DateTime?
+  // True only after bytes are confirmed in object storage (seed rows are metadata-only).
+  fileUploaded     Boolean            @default(false)
+  uploadedAt       DateTime           @default(now())
+  deletedAt        DateTime?
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions DocumentVersion[]
+
+  @@index([userId, type])
+  @@index([expiresAt])
+  @@map("documents")
+}
+
+model DocumentVersion {
+  id         String   @id @default(uuid())
+  documentId String
+  storageKey String
+  mimeType   String
+  sizeBytes  Int
+  createdAt  DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@map("document_versions")
+}
+
+// ============================ JOURNEY & TASKS ============================
+
+model JourneyTemplate {
+  id          String        @id @default(uuid())
+  key         String        @unique
+  title       String
+  totalDays   Int
+  description String?
+  steps       JourneyStep[]
+
+  @@map("journey_templates")
+}
+
+model JourneyStep {
+  id          String   @id @default(uuid())
+  templateId  String
+  /// Stable stage key (e.g. "residence") so clients can map steps to UI slots.
+  key         String
+  day         Int
+  title       String
+  description String?
+  order       Int      @default(0)
+  /// Navigation target for the step's call-to-action (content, not a business rule).
+  ctaLabel    String?
+  ctaTo       String?
+
+  template JourneyTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  users    UserJourneyStep[]
+  tasks    Task[]
+
+  @@unique([templateId, day])
+  @@unique([templateId, key])
+  @@map("journey_steps")
+}
+
+model UserJourneyStep {
+  id          String            @id @default(uuid())
+  userId      String
+  stepId      String
+  status      JourneyStepStatus @default(upcoming)
+  dueAt       DateTime?
+  completedAt DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  user User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  step JourneyStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, stepId])
+  @@index([userId, status])
+  @@map("user_journey_steps")
+}
+
+model Task {
+  id          String    @id @default(uuid())
+  userId      String
+  /// When set, the task is a checklist item belonging to a journey step.
+  stepId      String?
+  title       String
+  dueAt       DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  step JourneyStep? @relation(fields: [stepId], references: [id], onDelete: Cascade)
+
+  @@index([userId, completedAt])
+  @@index([userId, stepId])
+  @@map("tasks")
+}
+
+// ============================ JOBS ============================
+
+model JobSource {
+  id          String          @id @default(uuid())
+  name        String          @unique
+  adapterKey  String          @unique
+  enabled     Boolean         @default(false)
+  health      JobSourceHealth @default(unknown)
+  lastSyncAt  DateTime?
+  createdAt   DateTime        @default(now())
+
+  jobs Job[]
+
+  @@map("job_sources")
+}
+
+model Job {
+  id            String         @id @default(uuid())
+  sourceId      String
+  externalId    String
+  title         String
+  company       String
+  location      String
+  employmentType EmploymentType
+  remote        Boolean        @default(false)
+  salaryMin     Int?
+  salaryMax     Int?
+  currency      String?        @default("TRY")
+  description   String?
+  sourceUrl     String
+  postedAt      DateTime       @default(now())
+  status        JobStatus      @default(active)
+  deletedAt     DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  source       JobSource      @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  skills       JobSkill[]
+  languages    JobLanguage[]
+  savedBy      SavedJob[]
+  applications Application[]
+  matches      JobMatch[]
+
+  @@unique([sourceId, externalId])
+  @@index([status, postedAt])
+  @@index([location])
+  @@map("jobs")
+}
+
+model JobSkill {
+  jobId   String
+  skillId String
+
+  job   Job   @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, skillId])
+  @@map("job_skills")
+}
+
+model JobLanguage {
+  jobId         String
+  languageId    String
+  requiredLevel LanguageLevel @default(Beginner)
+
+  job      Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  language Language @relation(fields: [languageId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, languageId])
+  @@map("job_languages")
+}
+
+model SavedJob {
+  userId    String
+  jobId     String
+  savedAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@id([userId, jobId])
+  @@map("saved_jobs")
+}
+
+model Application {
+  id        String            @id @default(uuid())
+  userId    String
+  jobId     String
+  status    ApplicationStatus @default(draft)
+  coverNote String?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, jobId])
+  @@map("applications")
+}
+
+model JobMatch {
+  id            String   @id @default(uuid())
+  userId        String
+  jobId         String
+  score         Int
+  confidence    Float
+  skillsScore   Int
+  languageScore Int
+  reasons       Json
+  computedAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, jobId])
+  @@index([userId, score])
+  @@map("job_matches")
+}
+
+// ============================ PROVIDERS ============================
+
+model Provider {
+  id            String           @id @default(uuid())
+  ownerId       String?          @unique
+  name          String
+  category      ProviderCategory
+  specialty     String
+  location      String
+  languages     String[]
+  priceMin      Int?
+  priceMax      Int?
+  currency      String           @default("TRY")
+  trustScore    Int              @default(0)
+  verified      Boolean          @default(false)
+  verifiedAt    DateTime?
+  verifiedById  String?
+  status        ProviderStatus   @default(pending)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  deletedAt     DateTime?
+
+  owner   User?            @relation("ProviderOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  reviews ProviderReview[]
+
+  @@index([category, status])
+  @@map("providers")
+}
+
+model ProviderReview {
+  id         String   @id @default(uuid())
+  providerId String
+  authorId   String?
+  rating     Int
+  comment    String?
+  createdAt  DateTime @default(now())
+
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  author   User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([providerId])
+  @@map("provider_reviews")
+}
+
+// ============================ TICKETS ============================
+
+model Ticket {
+  id         String         @id @default(uuid())
+  code       String         @unique
+  userId     String
+  subject    String
+  category   String?
+  status     TicketStatus   @default(open)
+  priority   TicketPriority @default(medium)
+  assignedTo String?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages    TicketMessage[]
+  attachments TicketAttachment[]
+
+  @@index([userId, status])
+  @@map("tickets")
+}
+
+model TicketMessage {
+  id        String   @id @default(uuid())
+  ticketId  String
+  authorId  String?
+  isStaff   Boolean  @default(false)
+  body      String
+  createdAt DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User?  @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([ticketId])
+  @@map("ticket_messages")
+}
+
+model TicketAttachment {
+  id               String   @id @default(uuid())
+  ticketId         String
+  originalFilename String
+  storageKey       String
+  mimeType         String
+  sizeBytes        Int
+  createdAt        DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId])
+  @@map("ticket_attachments")
+}
+
+// ============================ CONTENT / GUIDES / LEGAL ============================
+
+model Guide {
+  id                String    @id @default(uuid())
+  slug              String    @unique
+  title             String
+  audience          String
+  whenToAct         String
+  documents         Json
+  steps             Json
+  warnings          Json
+  officialSource    String
+  officialSourceUrl String?
+  jurisdiction      String    @default("TR")
+  lastVerifiedAt    DateTime?
+  publishedAt       DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@map("guides")
+}
+
+model CitizenshipPath {
+  id                String          @id @default(uuid())
+  goal              CitizenshipGoal
+  jurisdiction      String          @default("TR")
+  title             String
+  summary           String
+  minYears          Int?
+  steps             Json
+  officialSourceUrl String?
+  disclaimer        String
+  lastVerifiedAt    DateTime?
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([goal, jurisdiction])
+  @@map("citizenship_paths")
+}
+
+model CommunityOpportunity {
+  id         String     @id @default(uuid())
+  title      String
+  source     String
+  channel    String
+  category   String
+  trustLevel TrustLevel @default(Unverified)
+  url        String
+  postedAt   DateTime   @default(now())
+
+  @@index([postedAt])
+  @@map("community_opportunities")
+}
+
+// ============================ NOTIFICATIONS & AUDIT ============================
+
+model Notification {
+  id        String            @id @default(uuid())
+  userId    String
+  type      NotificationType  @default(info)
+  event     NotificationEvent
+  title     String
+  body      String
+  data      Json?
+  read      Boolean           @default(false)
+  readAt    DateTime?
+  createdAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String?
+  before     Json?
+  after      Json?
+  requestId  String?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}

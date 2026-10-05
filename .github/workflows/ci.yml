@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs for the same ref to keep the queue short.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  api:
+    name: API (typecheck · test · build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            packages/shared/package-lock.json
+            apps/api/package-lock.json
+
+      # The API compiles against @tr-life/shared's built dist/, so shared must be
+      # built before apps/api typechecks (see the "build-ordering gotcha" note in README).
+      - name: Install & build @tr-life/shared
+        working-directory: packages/shared
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install API dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Prisma generate (needed before tsc sees the client types)
+        run: npx prisma generate
+
+      - name: Typecheck (strict)
+        run: npm run typecheck
+
+      - name: Typecheck tests (strict)
+        run: npm run test:types
+
+      - name: Unit tests (node:test)
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-dist
+          path: apps/api/dist
+          retention-days: 1
+
+  web:
+    name: Web (typecheck · build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      # `tsc -b` runs inside `npm run build`, so a single build step is enough
+      # to gate on TypeScript strict mode for the SPA.
+      - name: Build (Vite)
+        env:
+          VITE_DATA_SOURCE: mock
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: dist
+          retention-days: 1
+
+  # A separate job builds the production images but does NOT push them; publishing
+  # is intentionally left to an operator. This verifies the Dockerfiles stay green.
+  docker:
+    name: Docker images (build only)
+    runs-on: ubuntu-latest
+    needs: [api, web]
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build -f apps/api/Dockerfile -t trlife-api:ci .
+
+      - name: Build Web image
+        run: docker build -t trlife-web:ci --build-arg VITE_DATA_SOURCE=http .

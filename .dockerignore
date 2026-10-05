@@ -1,0 +1,29 @@
+# Keep the build context lean and never leak secrets or local artifacts.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+
+# Env & secrets — Docker reads runtime values via env_file / environment, never the file.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local artifacts and logs
+**/.storage
+**/.storage-test
+**/coverage
+**/*.log
+
+# VCS / tooling noise
+.git
+.github
+.vscode
+.idea
+.DS_Store
+**/*.zip
+
+# The compose / Docker files themselves are not needed inside the image.
+**/Dockerfile
+**/.dockerignore
+docker-compose.yml
+docker-compose.prod.yml

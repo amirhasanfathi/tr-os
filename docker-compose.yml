@@ -1,0 +1,33 @@
+# Local development infrastructure.
+# Usage: docker compose up -d db   (then: cd apps/api && npm run prisma:migrate)
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: trlife-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: trlife
+      POSTGRES_PASSWORD: trlife
+      POSTGRES_DB: trlife
+    ports:
+      - '5432:5432'
+    volumes:
+      - trlife_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U trlife -d trlife']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Optional web UI for inspecting the database during development.
+  adminer:
+    image: adminer:4
+    container_name: trlife-adminer
+    restart: unless-stopped
+    ports:
+      - '8080:8080'
+    depends_on:
+      - db
+
+volumes:
+  trlife_pgdata:

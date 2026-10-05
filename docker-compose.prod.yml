@@ -1,0 +1,76 @@
+# Production-shaped stack for TR Life OS: PostgreSQL + API + Web.
+# The API container applies Prisma migrations on boot (RUN_MIGRATIONS=true);
+# the web container serves the built SPA behind nginx.
+#
+#   cp .env.example .env        # fill in real secrets — never commit
+#   docker compose -f docker-compose.prod.yml build
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# The dev-only `docker-compose.yml` (db + adminer) is separate and stays unchanged.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trlife}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-trlife}
+    volumes:
+      - trlife_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-trlife} -d ${POSTGRES_DB:-trlife}']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: trlife-api:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-trlife}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-trlife}?schema=public
+      CORS_ORIGIN: ${PUBLIC_WEB_URL:-http://localhost:8080}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_PRETTY: 'false'
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET must be set in .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET must be set in .env}
+      JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN:-15m}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-30d}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_DIR: /data/storage
+      STORAGE_SIGNING_KEY: ${STORAGE_SIGNING_KEY:?STORAGE_SIGNING_KEY must be set in .env}
+      STORAGE_PUBLIC_BASE_URL: ${PUBLIC_API_URL:-http://localhost:4000}
+      STORAGE_SIGNED_URL_TTL: ${STORAGE_SIGNED_URL_TTL:-300}
+      QUEUE_DRIVER: memory
+      QUEUE_ENABLED: 'true'
+    volumes:
+      - trlife_storage:/data/storage
+    ports:
+      - '${API_PORT:-4000}:4000'
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_DATA_SOURCE: http
+        VITE_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
+    image: trlife-web:latest
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - '${WEB_PORT:-8080}:80'
+
+volumes:
+  trlife_pgdata:
+  trlife_storage:
