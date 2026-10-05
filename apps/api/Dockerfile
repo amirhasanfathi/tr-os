@@ -13,8 +13,12 @@
 
 # ---------- Build stage ----------
 FROM node:22-slim AS build
-WORKDIR /app
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
 # Install + compile @tr-life/shared first; apps/api imports its built dist/.
 COPY packages/shared/package.json packages/shared/package-lock.json* packages/shared/tsconfig.json /app/packages/shared/
 COPY packages/shared/src /app/packages/shared/src/
